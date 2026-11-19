@@ -1,0 +1,6 @@
+name: astrbot_plugin_style_prob
+display_name: 表达风格频率控制
+desc: 按可配置的概率向本轮用户消息末尾追加风格指令，并通过判定模型闭环调节，让某种表达风格的出现频率稳定可控。
+version: v0.1.0
+author: qualcone
+astrbot_version: ">=4.9.2"
