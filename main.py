@@ -48,6 +48,7 @@ class StyleProbPlugin(Star):
         self._judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)  # 限制同时进行的判定调用数
         self._warned: set[str] = set()
         self._migrate_scope()
+        self._register_web()
 
     # ------------------------------------------------------------------ 配置
     # 所有配置读取都经过清洗：WebUI 或手改配置文件可能给出 None、字符串、NaN、越界值，
@@ -212,6 +213,64 @@ class StyleProbPlugin(Star):
             warns.append(f"判定失败 {s['judge_failed']} 次，多于成功的 {s['judged']} 次：请检查判定模型是否可用、"
                          "超时设置是否过短（失败的轮次不会重置计数）")
         return warns
+
+    # ------------------------------------------------------------------ 状态页（WebUI）
+    # 在 AstrBot 管理面板的插件页面里提供一个只读的“频率状态”页：views/status/index.html 通过下面这个接口取数据。
+    # 旧版 AstrBot 没有插件页面功能时，页面不会出现，接口也无人调用，对其他功能没有影响。
+    WEB_ROUTE = "/astrbot_plugin_style_prob/status"
+    SNAPSHOT_SESSIONS = 100  # 状态页最多列出多少个会话
+    SNAPSHOT_SCAN = 300      # 为取“最近活跃”的会话，最多读取多少个会话的记录
+
+    def _register_web(self):
+        try:
+            register = getattr(self.context, "register_web_api", None)
+            if callable(register):
+                register(self.WEB_ROUTE, self._api_status, ["GET"], "风格频率状态（只读）")
+        except Exception as e:
+            logger.warning(f"[style_prob] 状态页接口注册失败，不影响其他功能: {e!r}")
+
+    async def _api_status(self):
+        try:
+            return {"status": "ok", "data": await self._snapshot()}
+        except Exception as e:
+            logger.error(f"[style_prob] 状态页取数失败: {e!r}")
+            return {"status": "error", "message": "读取状态失败，详见日志", "data": {}}
+
+    async def _snapshot(self) -> dict:
+        """状态页用的数据：当前设置的理论值、累计统计，以及最近活跃会话的计数与当前概率。"""
+        params = self._params()
+        p0, pmax, n = params
+        et = core.expected_interval(*params)
+        stats = await self._get_stats()
+        index = await self._get_index()
+
+        rows = []
+        for umo in index[-self.SNAPSHOT_SCAN:]:
+            st = self._states.get(umo)
+            if st is None:
+                raw = await self.get_kv_data(f"state:{umo}", None)
+                st = core.SessionState.from_dict(raw)
+            rows.append({"umo": umo, "k": st.k, "prob": core.prob_at(st.k, *params), "ts": st.ts})
+        rows.sort(key=lambda r: r["ts"], reverse=True)
+
+        ivs = stats["intervals"]
+        return {
+            "enabled": self._flag("enabled", True),
+            "intensity": self._intensity(),
+            "intensity_label": core.PRESET_LABELS[self._intensity()],
+            "params": {"p0": p0, "p_max": pmax, "ramp_steps": n},
+            "expected_interval": None if et == float("inf") else et,
+            "expected_per_100": core.expected_triggers(100, *params),
+            "stale": await self._stats_stale(),
+            "warnings": self._config_warnings(),
+            "totals": {k: stats[k] for k in ("messages", "injected", "judged", "hits", "judge_failed",
+                                              "inj_judged", "inj_hits")},
+            "measured_interval": (sum(ivs) / len(ivs)) if ivs else None,
+            "interval_count": len(ivs),
+            "session_count": len(index),
+            "sessions": rows[: self.SNAPSHOT_SESSIONS],
+            "server_time": time.time(),
+        }
 
     # ------------------------------------------------------------------ 持久化
     async def _get_state(self, umo: str) -> core.SessionState:

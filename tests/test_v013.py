@@ -259,5 +259,91 @@ class Persistence(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(s.ts, now - 5)
 
 
+class WebStatus(unittest.IsolatedAsyncioTestCase):
+    def test_route_registered_with_plugin_name_prefix(self):
+        calls = []
+        ctx = FakeContext()
+        ctx.register_web_api = lambda route, handler, methods, desc: calls.append((route, handler, methods))
+        plugin = make_plugin(ctx)
+        self.assertEqual(len(calls), 1)
+        route, handler, methods = calls[0]
+        self.assertTrue(route.startswith("/astrbot_plugin_style_prob/"))   # AstrBot 按首段识别插件名
+        self.assertEqual(methods, ["GET"])
+        self.assertEqual(handler, plugin._api_status)
+
+    def test_old_astrbot_without_web_api_is_fine(self):
+        make_plugin(FakeContext())                                          # 没有 register_web_api 也不报错
+
+        class Boom(FakeContext):
+            def register_web_api(self, *a):
+                raise RuntimeError("nope")
+        make_plugin(Boom())                                                 # 注册失败不影响插件
+
+    async def test_snapshot_contents(self):
+        plugin = make_plugin(FakeContext(answer="否", delay=0.0), intensity="custom", p0=0.1, p_max=0.5, ramp_steps=4)
+        now = time.time()
+        plugin._kv.update({
+            "sessions": ["old", "mid"],
+            "state:old": {"k": 3, "ts": now - 500},
+            "state:mid": {"k": 9, "ts": now - 50},
+        })
+        e = ev("live")
+        await plugin.on_req(e, make_req())
+        await plugin.on_resp(e, make_resp())
+        await plugin._wait_tasks()
+
+        r = await plugin._api_status()
+        self.assertEqual(r["status"], "ok")
+        d = r["data"]
+        self.assertEqual(d["params"], {"p0": 0.1, "p_max": 0.5, "ramp_steps": 4})
+        self.assertEqual(d["intensity"], "custom")
+        self.assertGreater(d["expected_interval"], 1)
+        self.assertEqual(d["totals"]["messages"], 1)
+        self.assertEqual(d["session_count"], 3)
+        umos = [x["umo"] for x in d["sessions"]]
+        self.assertEqual(umos, ["live", "mid", "old"])                      # 按最近活跃排序
+        mid = d["sessions"][1]
+        self.assertEqual(mid["k"], 9)
+        self.assertAlmostEqual(mid["prob"], 0.5)                            # k=9 已超过爬升步数，保持上限
+        old = d["sessions"][2]
+        self.assertAlmostEqual(old["prob"], core.prob_at(3, 0.1, 0.5, 4))
+        import json
+        json.dumps(r)                                                       # 必须能序列化成 JSON
+
+    async def test_snapshot_does_not_load_all_sessions_into_memory(self):
+        plugin = make_plugin(FakeContext())
+        plugin._kv["sessions"] = [f"s{i}" for i in range(50)]
+        for i in range(50):
+            plugin._kv[f"state:s{i}"] = {"k": 2, "ts": time.time()}
+        await plugin._snapshot()
+        self.assertEqual(plugin._states, {})                                # 只读，不污染内存缓存
+
+    async def test_snapshot_limits_rows(self):
+        plugin = make_plugin(FakeContext())
+        plugin.SNAPSHOT_SESSIONS, plugin.SNAPSHOT_SCAN = 5, 8
+        plugin._kv["sessions"] = [f"s{i}" for i in range(20)]
+        for i in range(20):
+            plugin._kv[f"state:s{i}"] = {"k": 2, "ts": 1000 + i}
+        d = await plugin._snapshot()
+        self.assertEqual(len(d["sessions"]), 5)
+        self.assertEqual(d["session_count"], 20)
+        self.assertEqual(d["sessions"][0]["umo"], "s19")
+
+    async def test_zero_probability_has_no_expected_interval(self):
+        plugin = make_plugin(FakeContext(), p0=0.0, p_max=0.0)
+        d = await plugin._snapshot()
+        self.assertIsNone(d["expected_interval"])
+
+    async def test_failure_returns_error_not_exception(self):
+        plugin = make_plugin(FakeContext())
+
+        async def boom():
+            raise RuntimeError("x")
+        plugin._snapshot = boom
+        r = await plugin._api_status()
+        self.assertEqual(r["status"], "error")
+        self.assertNotIn("RuntimeError", r["message"])                      # 不把内部异常细节暴露给前端
+
+
 if __name__ == "__main__":
     unittest.main()

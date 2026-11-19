@@ -2,6 +2,11 @@
 
 本文件记录各版本的主要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.4] - 2026-11-19
+
+### 新增
+- 管理面板里的「频率状态」页（只读）：显示概率曲线与理论值、累计统计，以及各会话当前处于第几条、当前注入概率和最近活跃时间。依赖 AstrBot 的插件页面功能，旧版本不会出现该页面，其余功能不受影响。
+
 ## [v0.1.3] - 2026-11-19
 
 ### 变更
@@ -53,6 +58,7 @@
 - 全部数字配置的范围校验，无效值回退为默认值并在 `/风格状态` 中提示。
 - 可选的关键词预判、仅对已注入回复判定、判定超时、按会话限定生效范围。
 
+[v0.1.4]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.2
 [v0.1.1]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.1
