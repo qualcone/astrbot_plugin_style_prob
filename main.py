@@ -20,10 +20,17 @@ from astrbot.api.star import Context, Star
 
 from . import core
 
+JUDGE_CONCURRENCY = 4  # 高并发时判定排队，避免瞬间向判定模型发出大量请求
 PENDING_TTL = 600  # 请求-响应之间的临时记录最多保留多少秒
+FLUSH_DELAY = 2.0  # 状态变化后延迟多少秒合并写入存储（同一时段内的多次变化只写一次）
+MAX_STATES_IN_MEMORY = 1000  # 内存里最多缓存多少个会话的状态，超出时淘汰最久没活跃的
+IDLE_DAYS = 90  # 超过多少天没有活跃的会话，其计数从存储里清理
+PRUNE_INTERVAL = 24 * 3600  # 清理不活跃会话的检查间隔（秒）
 
 
 class StyleProbPlugin(Star):
+    FLUSH_DELAY = FLUSH_DELAY  # 作为类属性，测试里可覆盖
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -34,7 +41,13 @@ class StyleProbPlugin(Star):
         self._pending: dict[int, core.RoundInfo] = {}
         self._tasks: set[asyncio.Task] = set()
         self._save_lock = asyncio.Lock()
+        self._dirty: set[str] = set()      # 有改动、还没写入存储的会话
+        self._stats_dirty = False
+        self._flush_task: asyncio.Task | None = None
+        self._last_prune = 0.0
+        self._judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)  # 限制同时进行的判定调用数
         self._warned: set[str] = set()
+        self._migrate_scope()
 
     # ------------------------------------------------------------------ 配置
     # 所有配置读取都经过清洗：WebUI 或手改配置文件可能给出 None、字符串、NaN、越界值，
@@ -75,35 +88,63 @@ class StyleProbPlugin(Star):
         v = core.to_int(self.config.get("judge_timeout", 30))
         return min(v, 300) if v is not None and v >= 1 else 30
 
-    def _scope_sessions(self) -> set[str]:
-        return set(core.clean_str_list(self.config.get("scope_sessions", [])))
-
     def _keywords(self) -> list[str]:
         return core.clean_str_list(self.config.get("keyword_hints", []))
 
-    def _scope_mode(self) -> str:
-        """all / persona / session。旧版本的 "specified" 等同于 session；无法识别时按 all 处理。"""
-        v = self.config.get("scope_mode", "all")
-        if v == "specified":
-            return "session"
-        return v if v in ("persona", "session") else "all"
+    @staticmethod
+    def _as_set(v) -> set[str]:
+        """列表项或逗号/换行分隔的字符串 → 去空白、去空项的集合。"""
+        if isinstance(v, list):
+            return set(core.clean_str_list(v))  # 与其他列表项一致：忽略空项和无法转成文本的项
+        if isinstance(v, str):
+            return {s.strip() for s in re.split(r"[,，、\n]", v) if s.strip()}
+        return set()
+
+    def _scope_sessions(self) -> set[str]:
+        """限定的会话集合；为空表示不按会话限定。"""
+        return self._as_set(self.config.get("scope_sessions", []))
 
     def _scope_personas(self) -> set[str]:
-        """配置页的人设选择器只返回单个 ID 字符串；这里也容忍逗号/换行分隔的多个，以及列表。"""
-        v = self.config.get("scope_persona", "")
-        items = v if isinstance(v, list) else re.split(r"[,，、\n]", v) if isinstance(v, str) else []
-        return {s.strip() for s in items if isinstance(s, str) and s.strip()}
+        """限定的人设集合；为空表示不按人设限定。"""
+        return self._as_set(self.config.get("scope_personas", []))
 
     def _in_scope(self, umo: str, persona_id: str | None = None) -> bool:
-        mode = self._scope_mode()
-        if mode == "session":
-            return umo in self._scope_sessions()
-        if mode == "persona":
-            personas = self._scope_personas()
-            if "*" in personas:  # AstrBot 人设选择器里“全部”对应 *
-                return True
+        """会话与人设是两个独立的筛选条件：留空的不限制，都填写时必须同时满足。"""
+        sessions = self._scope_sessions()
+        if sessions and umo not in sessions:
+            return False
+        personas = self._scope_personas()
+        if personas and "*" not in personas:
             return persona_id is not None and persona_id in personas
         return True
+
+    def _migrate_scope(self):
+        """从 v0.1.2 及更早的“生效范围”单选项迁移到“会话 + 人设”两个独立筛选。
+
+        旧项保留在配置结构里（隐藏）只为了读到旧值：all → 都不限制；session/specified → 只保留会话；
+        persona → 只保留人设（旧的单选人设并入新的多选列表）。迁移后清空旧项，只做一次。"""
+        try:
+            mode = self.config.get("scope_mode", "")
+            if not isinstance(mode, str) or not mode:
+                return
+            sessions = self._scope_sessions()
+            personas = self._scope_personas() | self._as_set(self.config.get("scope_persona", ""))
+            if mode == "persona":
+                sessions = set()
+            elif mode in ("session", "specified"):
+                personas = set()
+            else:
+                sessions, personas = set(), set()
+            self.config["scope_sessions"] = sorted(sessions)
+            self.config["scope_personas"] = sorted(personas)
+            self.config["scope_mode"] = ""
+            self.config["scope_persona"] = ""
+            save = getattr(self.config, "save_config", None)
+            if callable(save):
+                save()
+            logger.info(f"[style_prob] 已把旧版“生效范围”迁移为：会话 {len(sessions)} 个，人设 {len(personas)} 个")
+        except Exception as e:
+            logger.warning(f"[style_prob] 旧版生效范围迁移失败，请在配置页重新选择：{e!r}")
 
     async def _resolve_persona(self, event) -> str | None:
         """当前会话实际使用的人设 ID；取不到返回 None。
@@ -153,10 +194,23 @@ class StyleProbPlugin(Star):
         if t is None or not 1 <= t <= 300:
             warns.append(f"判定超时 = {self.config.get('judge_timeout')!r} 无效（需要 1~300 的整数秒），"
                          f"已改用 {self._timeout()}")
-        if self._scope_mode() == "session" and not self._scope_sessions():
-            warns.append("生效范围是“指定会话”，但会话列表为空，当前不会对任何会话生效")
-        if self._scope_mode() == "persona" and not self._scope_personas():
-            warns.append("生效范围是“指定人设”，但未选择人设，当前不会对任何会话生效")
+        personas = self._scope_personas() - {"*"}
+        if personas:  # 填错人设 ID 会导致永远不生效，对照 AstrBot 现有人设检查
+            try:
+                pm = getattr(self.context, "persona_manager", None)
+                known = {getattr(p, "persona_id", None) for p in (getattr(pm, "personas", None) or [])}
+                known |= {p.get("name") for p in (getattr(pm, "personas_v3", None) or []) if isinstance(p, dict)}
+                known.add("default")
+                known.discard(None)
+                unknown = sorted(personas - known) if len(known) > 1 else []
+                if unknown:
+                    warns.append("以下人设 ID 在 AstrBot 中不存在，请核对拼写：" + "、".join(unknown))
+            except Exception:
+                pass
+        s = self._stats  # 判定模型不可用时失败会悄悄累积，这里给出提示
+        if s and s["judge_failed"] >= 5 and s["judge_failed"] > s["judged"]:
+            warns.append(f"判定失败 {s['judge_failed']} 次，多于成功的 {s['judged']} 次：请检查判定模型是否可用、"
+                         "超时设置是否过短（失败的轮次不会重置计数）")
         return warns
 
     # ------------------------------------------------------------------ 持久化
@@ -166,7 +220,19 @@ class StyleProbPlugin(Star):
             raw = await self.get_kv_data(f"state:{umo}", None)
             st = core.SessionState.from_dict(raw)  # 数据损坏时回到 k=1
             self._states[umo] = st
+            self._evict_states()
+        st.ts = time.time()  # 记录最近活跃时间
         return st
+
+    def _evict_states(self):
+        """内存里的会话状态太多时，淘汰最久没活跃的。已写入存储的下次用到会重新读取；
+        还没写入的（_dirty）和正在进行中的轮次不会被淘汰，所以不会丢数据。"""
+        if len(self._states) <= MAX_STATES_IN_MEMORY:
+            return
+        busy = self._dirty | {i.umo for i in self._pending.values()}
+        idle = sorted((u for u in self._states if u not in busy), key=lambda u: self._states[u].ts)
+        for u in idle[: len(self._states) - int(MAX_STATES_IN_MEMORY * 0.8)]:
+            del self._states[u]
 
     def _fingerprint(self) -> str:
         """当前生效的频率参数 + 风格指令。统计数据记录它，用来发现“改过设置”。"""
@@ -211,17 +277,86 @@ class StyleProbPlugin(Star):
         return self._index
 
     async def _persist(self, umo: str | None = None):
-        """串行写入，并在持锁后才取快照，保证后写入的一定是最新值。"""
+        """登记“有改动”，稍后合并写入：同一时段内的多次变化只写一次存储，避免每条回复都落盘。"""
+        if umo is not None:
+            self._dirty.add(umo)
+        self._stats_dirty = True
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = self._spawn(self._flush_later())
+
+    async def _flush_later(self):
+        try:
+            await asyncio.sleep(max(float(self.FLUSH_DELAY), 0.0))
+            await self._flush()
+            await self._maybe_prune()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"[style_prob] 写入存储失败，数据保留在内存中，稍后重试: {e!r}")
+
+    async def _flush(self):
+        """串行写入，并在持锁后才取快照，保证后写入的一定是最新值。失败时把未写入的改动放回去。"""
         async with self._save_lock:
-            if umo is not None and umo in self._states:
-                index = await self._get_index()
-                if umo not in index:
-                    index.append(umo)
-                    await self.put_kv_data("sessions", list(index))
-                await self.put_kv_data(f"state:{umo}", self._states[umo].to_dict())
-            if self._stats is not None:
-                self._stats["intervals"] = self._stats["intervals"][-core.MAX_INTERVALS:]
-                await self.put_kv_data("stats", dict(self._stats))
+            dirty, self._dirty = self._dirty, set()
+            stats_dirty, self._stats_dirty = self._stats_dirty, False
+            try:
+                for umo in sorted(dirty):
+                    if umo not in self._states:
+                        dirty.discard(umo)
+                        continue
+                    index = await self._get_index()
+                    if umo not in index:
+                        index.append(umo)
+                        await self.put_kv_data("sessions", list(index))
+                    await self.put_kv_data(f"state:{umo}", self._states[umo].to_dict())
+                    dirty.discard(umo)
+                if stats_dirty and self._stats is not None:
+                    self._stats["intervals"] = self._stats["intervals"][-core.MAX_INTERVALS:]
+                    await self.put_kv_data("stats", dict(self._stats))
+                    stats_dirty = False
+            except BaseException:
+                self._dirty |= dirty
+                self._stats_dirty = self._stats_dirty or stats_dirty
+                raise
+
+    async def _maybe_prune(self):
+        """每天最多检查一次：清理长期不活跃的会话，避免存储里的会话记录只增不减。"""
+        now = time.time()
+        if now - self._last_prune < PRUNE_INTERVAL:
+            return
+        self._last_prune = now
+        async with self._save_lock:
+            index = await self._get_index()
+            cutoff = now - IDLE_DAYS * 86400
+            keep, removed = [], 0
+            for umo in list(index):
+                if umo in self._states or umo in self._dirty:
+                    keep.append(umo)
+                    continue
+                raw = await self.get_kv_data(f"state:{umo}", None)
+                has_ts = isinstance(raw, dict) and core.to_float(raw.get("ts")) is not None
+                st = core.SessionState.from_dict(raw)
+                if has_ts and st.ts < cutoff:
+                    await self.delete_kv_data(f"state:{umo}")
+                    removed += 1
+                    continue
+                if isinstance(raw, dict) and not has_ts:
+                    # 旧版本写入的记录没有活跃时间：补上，之后才能参与清理
+                    await self.put_kv_data(f"state:{umo}", st.to_dict())
+                keep.append(umo)
+            if removed:
+                index[:] = keep
+                await self.put_kv_data("sessions", list(index))
+                logger.info(f"[style_prob] 已清理 {removed} 个超过 {IDLE_DAYS} 天未活跃的会话计数")
+
+    async def _wait_tasks(self):
+        """等所有后台任务（判定、写入）结束。"""
+        while True:
+            pending = [t for t in self._tasks if not t.done()]
+            if not pending:
+                await asyncio.sleep(0)  # 让已完成任务的收尾回调有机会运行
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
 
     # ------------------------------------------------------------------ 钩子：请求前
     @filter.on_llm_request()
@@ -238,12 +373,14 @@ class StyleProbPlugin(Star):
         umo = event.unified_msg_origin
         if not instruction:
             return
+        if not self._is_user_turn(event, req):
+            return
         persona_id = None
-        if self._scope_mode() == "persona":
+        if self._scope_personas() - {"*"}:
             persona_id = await self._resolve_persona(event)
             if persona_id is None and "persona_unknown" not in self._warned:
                 self._warned.add("persona_unknown")
-                logger.warning("[style_prob] 无法确定当前会话的人设，按“指定人设”范围处理为不生效")
+                logger.warning("[style_prob] 无法确定当前会话的人设，已限定人设的情况下按不生效处理")
         if not self._in_scope(umo, persona_id):
             return
         key = id(event)
@@ -257,7 +394,26 @@ class StyleProbPlugin(Star):
         if injected:
             # 只动本轮用户消息末尾；system_prompt、contexts 保持原样以保护缓存前缀
             injected = self._inject(req, instruction)
-        self._pending[key] = core.RoundInfo(umo=umo, k=st.k, injected=injected)
+        self._pending[key] = core.RoundInfo(umo=umo, k=st.k, injected=injected, ev=event)
+
+    def _is_user_turn(self, event, req) -> bool:
+        """这次请求是不是由用户消息触发的。后台唤醒、子代理，以及其他插件自己发起的 LLM 请求
+        不应被注入或计数，否则会污染概率曲线和统计。可在配置里关闭这项过滤。"""
+        if not self._flag("only_user_requests", True):
+            return True
+        for key in ("_background_stop_signal", "_subagent_wakeup"):  # AstrBot 给后台/子代理事件打的标记
+            try:
+                if event.get_extra(key):
+                    return False
+            except Exception:
+                pass
+        try:
+            msg = (event.get_message_str() or "").strip()
+        except Exception:
+            msg = ""
+        prompt = getattr(req, "prompt", None) or ""
+        # 正常流程里请求文本包含用户原话；有用户原话却不在请求文本里，说明请求是别处拼出来的
+        return not (msg and isinstance(prompt, str) and prompt and msg not in prompt)
 
     def _inject(self, req: ProviderRequest, instruction: str) -> bool:
         """prompt 模式：追加到 req.prompt（会随用户消息写入历史）。
@@ -295,6 +451,7 @@ class StyleProbPlugin(Star):
 
         st = await self._get_state(info.umo)
         st.k += 1  # 先按"未出现"计数；判定为出现时再重置，判定失败也不会让 k 停滞
+        self._dirty.add(info.umo)  # 立刻登记为“有改动”，之后到写入前不会被内存淘汰
         stats = await self._get_stats()
         stats["messages"] += 1
         if info.injected:
@@ -339,7 +496,10 @@ class StyleProbPlugin(Star):
             if hit:
                 stats["hits"] += 1
                 stats["intervals"].append(info.k)  # 间隔 T = 触发时的 k
-                (await self._get_state(info.umo)).k = 1
+                # 判定是异步的：期间同一会话可能又来了新消息。只扣掉“触发那条及之前”的部分，
+                # 触发之后已经过去的消息条数保留，不会被一刀切回 1
+                st = await self._get_state(info.umo)
+                st.k = max(1, st.k - info.k)
             await self._persist(info.umo)
         except asyncio.CancelledError:
             raise
@@ -364,7 +524,8 @@ class StyleProbPlugin(Star):
             pid = self._text("judge_provider")
             if not pid:
                 pid = await self.context.get_current_chat_provider_id(umo=umo)
-            text = await asyncio.wait_for(self._call_llm(pid, prompt), timeout=self._timeout())
+            async with self._judge_sem:
+                text = await asyncio.wait_for(self._call_llm(pid, prompt), timeout=self._timeout())
         except Exception as e:
             logger.warning(f"[style_prob] 判定模型调用失败，本轮不更新: {e!r}")
             return None
@@ -475,9 +636,10 @@ class StyleProbPlugin(Star):
         st = await self._get_state(umo)
         stats = await self._get_stats()
         p = core.prob_at(st.k, *self._params())
-        persona_id = await self._resolve_persona(event) if self._scope_mode() == "persona" else None
+        limited_personas = bool(self._scope_personas() - {"*"})
+        persona_id = await self._resolve_persona(event) if limited_personas else None
         scope = "是" if self._in_scope(umo, persona_id) else "否（不在生效范围内）"
-        persona_note = f"；当前人设：{persona_id or '未知'}" if self._scope_mode() == "persona" else ""
+        persona_note = f"；当前人设：{persona_id or '未知'}" if limited_personas else ""
         text = (
             f"当前会话：距上次触发已过 {st.k - 1} 条消息，下一条为第 k = {st.k} 条，注入概率 {p:.3f}\n"
             f"强度档位：{core.PRESET_LABELS[self._intensity()]}；本会话在生效范围内：{scope}{persona_note}\n"
@@ -506,6 +668,8 @@ class StyleProbPlugin(Star):
             count = len(index)
             self._states.clear()
             self._pending.clear()
+            self._dirty.clear()
+            self._stats_dirty = False
             self._index = []
             self._stats = None
         yield event.plain_result(f"已清空：{count} 个会话的计数与全部统计数据，所有会话从 k = 1 重新开始。")
@@ -516,6 +680,7 @@ class StyleProbPlugin(Star):
         umo = event.unified_msg_origin
         (await self._get_state(umo)).k = 1
         await self._persist(umo)
+        await self._flush()  # 用户明确的操作，立刻落盘
         yield event.plain_result(f"已重置：k = 1，当前概率 = {core.prob_at(1, *self._params()):.3f}")
 
     # 自测专用：指令和测试消息都写死，不读配置，保证每次测的是同一件事。
@@ -586,3 +751,7 @@ class StyleProbPlugin(Star):
             t.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        try:  # 退出前把还没写入的改动落盘
+            await self._flush()
+        except Exception as e:
+            logger.error(f"[style_prob] 退出时写入存储失败: {e!r}")

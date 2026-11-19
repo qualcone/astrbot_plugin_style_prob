@@ -186,7 +186,7 @@ GARBAGE_CONFIG = {
     "p0": "abc", "p_max": None, "ramp_steps": NAN,
     "judge_timeout": "x", "judge_provider": 123, "judge_prompt": 5,
     "judge_include_user": "false", "judge_only_when_injected": "yes",
-    "keyword_hints": "喵\n汪", "scope_mode": "specified",
+    "keyword_hints": "喵\n汪",
     "scope_sessions": [{"a": 1}, 5, None, "u1"], "inject_mode": "bogus",
 }
 
@@ -218,7 +218,7 @@ class PluginWithBadConfig(unittest.IsolatedAsyncioTestCase):
             ev = make_event("u1")
             await p.on_req(ev, make_req())
             await p.on_resp(ev, make_resp())
-            await asyncio.gather(*p._tasks)
+            await p._wait_tasks()
         await self._commands(p)
         status =[x async for x in p.cmd_status(make_event("u1"))][0]
         self.assertIn("p0", status)
@@ -247,11 +247,6 @@ class PluginWithBadConfig(unittest.IsolatedAsyncioTestCase):
             status = [x async for x in p.cmd_status(make_event())][0]
             self.assertIn("风格指令为空", status)
 
-    async def test_specified_scope_with_empty_list_warns(self):
-        p = make_plugin(FakeContext(), scope_mode="specified", scope_sessions=[])
-        status = [x async for x in p.cmd_status(make_event())][0]
-        self.assertIn("会话列表为空", status)
-
     async def test_hooks_swallow_internal_errors(self):
         p = make_plugin(FakeContext())
         bad_event = SimpleNamespace()                   # 没有 unified_msg_origin，访问会抛 AttributeError
@@ -264,7 +259,7 @@ class PluginWithBadConfig(unittest.IsolatedAsyncioTestCase):
         ev = make_event("u1")
         await p.on_req(ev, make_req())
         await p.on_resp(ev, make_resp())
-        await asyncio.gather(*p._tasks)
+        await p._wait_tasks()
         self.assertEqual(p._states["u1"].k, 2)
         self.assertEqual(p._stats["messages"], 1)
         await self._commands(p)
@@ -289,7 +284,7 @@ class ChangeSettingsWithoutClearing(unittest.IsolatedAsyncioTestCase):
         ev = make_event(umo)
         await p.on_req(ev, make_req())
         await p.on_resp(ev, make_resp())
-        await asyncio.gather(*p._tasks)
+        await p._wait_tasks()
 
     async def test_switching_tiers_mid_run_is_safe(self):
         p = make_plugin(FakeContext(answer="否", delay=0.0), intensity="low")

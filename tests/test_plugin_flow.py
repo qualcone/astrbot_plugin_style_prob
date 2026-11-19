@@ -94,9 +94,11 @@ def make_plugin(ctx, **cfg):
             "ramp_steps": 5, "inject_mode": "prompt", "judge_provider": "cheap", "judge_prompt": "",
             "judge_include_user": False, "keyword_hints": [],
             "judge_only_when_injected": True, "judge_timeout": 5,
-            "scope_mode": "all", "scope_sessions": []}
+            "scope_sessions": [], "scope_personas": []}
     base.update(cfg)
-    return StyleProbPlugin(ctx, base)
+    plugin = StyleProbPlugin(ctx, base)
+    plugin.FLUSH_DELAY = 0  # 测试里不等待合并写入的延迟
+    return plugin
 
 
 def make_event(umo="u1", msg="你好"):
@@ -190,7 +192,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         ev = make_event(umo)
         await plugin.on_req(ev, make_req())
         await plugin.on_resp(ev, make_resp())
-        await asyncio.gather(*plugin._tasks)
+        await plugin._wait_tasks()
 
     async def test_state_survives_restart(self):
         p1 = make_plugin(FakeContext(answer="否", delay=0.01))
@@ -270,46 +272,6 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         await plugin.on_req(make_event(), req)
         self.assertEqual(req.prompt, "你好")
 
-    async def test_scope_specified(self):
-        plugin = make_plugin(FakeContext(), scope_mode="specified", scope_sessions=["other"])
-        req = make_req()
-        await plugin.on_req(make_event("u1"), req)
-        self.assertEqual(req.prompt, "你好")
-
-    async def test_scope_session_mode(self):
-        plugin = make_plugin(FakeContext(), scope_mode="session", scope_sessions=["u1"])
-        req_in, req_out = make_req(), make_req()
-        await plugin.on_req(make_event("u1"), req_in)
-        await plugin.on_req(make_event("u2"), req_out)
-        self.assertIn("请撒娇", req_in.prompt)
-        self.assertEqual(req_out.prompt, "你好")
-
-    async def test_scope_persona_mode(self):
-        def ev(persona):
-            e = make_event()
-            e.get_extra = lambda k, d=None: persona if k == "_trace_persona_id" else d
-            return e
-
-        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_persona="cat")
-        hit, miss, unknown = make_req(), make_req(), make_req()
-        await plugin.on_req(ev("cat"), hit)
-        await plugin.on_req(ev("dog"), miss)
-        await plugin.on_req(ev(None), unknown)   # 取不到人设：按不生效处理
-        self.assertIn("请撒娇", hit.prompt)
-        self.assertEqual(miss.prompt, "你好")
-        self.assertEqual(unknown.prompt, "你好")
-        self.assertEqual(len(plugin._pending), 1)  # 只有命中范围的那一轮被登记
-
-    async def test_scope_persona_wildcard_and_fallbacks(self):
-        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_persona="*")
-        self.assertTrue(plugin._in_scope("u1", "anything"))
-        self.assertTrue(plugin._in_scope("u1", None))
-        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_persona="")
-        self.assertFalse(plugin._in_scope("u1", "cat"))
-        self.assertTrue(any("未选择人设" in w for w in plugin._config_warnings()))
-        plugin = make_plugin(FakeContext(), scope_mode="bogus")
-        self.assertEqual(plugin._scope_mode(), "all")
-
     async def test_resolve_persona_fallback_chain(self):
         class PM:
             default_persona = "default"
@@ -327,7 +289,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext()
         ctx.persona_manager = PM()
         ctx.conversation_manager = CM("cat")
-        plugin = make_plugin(ctx, scope_mode="persona", scope_persona="cat")
+        plugin = make_plugin(ctx, scope_personas=["cat"])
         self.assertEqual(await plugin._resolve_persona(make_event()), "cat")
         ctx.conversation_manager = CM(None)   # 会话未指定人设：回落到默认人设
         self.assertEqual(await plugin._resolve_persona(make_event()), "default")
@@ -347,7 +309,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plugin._tasks), 1)                         # 判定在后台
         self.assertEqual(plugin._states["u1"].k, 7)                     # 先按"未出现"计数
 
-        await asyncio.gather(*plugin._tasks)
+        await plugin._wait_tasks()
         self.assertEqual(plugin._states["u1"].k, 1)                     # 判为是 -> 重置
         self.assertEqual(plugin._stats["intervals"], [6])               # 记录间隔 T=6
         self.assertEqual(plugin._kv["state:u1"]["k"], 1)                # 已持久化
@@ -360,7 +322,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         ev = make_event()
         await plugin.on_req(ev, make_req())
         await plugin.on_resp(ev, make_resp())
-        await asyncio.gather(*plugin._tasks)
+        await plugin._wait_tasks()
         self.assertEqual(plugin._states["u1"].k, 2)
         self.assertEqual(plugin._stats["intervals"], [])
 
@@ -370,7 +332,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         ev = make_event()
         await plugin.on_req(ev, make_req())
         await plugin.on_resp(ev, make_resp())
-        await asyncio.gather(*plugin._tasks)
+        await plugin._wait_tasks()
         self.assertEqual(ctx.calls, [])                 # 没注入 -> 不判定
         self.assertEqual(plugin._states["u1"].k, 2)     # 但 k 仍然 +1
 
@@ -380,7 +342,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         ev = make_event()
         await plugin.on_req(ev, make_req())
         await plugin.on_resp(ev, make_resp("喵～好的"))
-        await asyncio.gather(*plugin._tasks)
+        await plugin._wait_tasks()
         self.assertEqual(ctx.calls, [])
         self.assertEqual(plugin._states["u1"].k, 1)
 
@@ -392,7 +354,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         await plugin.on_resp(ev, mid)
         self.assertEqual(plugin._states["u1"].k, 1)     # 中间轮次不计数
         await plugin.on_resp(ev, make_resp())            # 最终回复才计数
-        await asyncio.gather(*plugin._tasks)
+        await plugin._wait_tasks()
 
     async def test_judge_failure_does_not_crash_or_reset(self):
         class Boom(FakeContext):
@@ -403,7 +365,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         ev = make_event()
         await plugin.on_req(ev, make_req())
         await plugin.on_resp(ev, make_resp())
-        await asyncio.gather(*plugin._tasks)
+        await plugin._wait_tasks()
         self.assertEqual(plugin._states["u1"].k, 2)
 
 

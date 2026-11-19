@@ -291,14 +291,21 @@ def empirical_cdf(intervals: list[int], kmax: int) -> list[float]:
 @dataclass
 class SessionState:
     k: int = 1  # 下一条消息是"自上次触发后的第 k 条"
+    ts: float = field(default_factory=time.time)  # 最近一次活跃时间，用于清理长期不活跃的会话
 
     def to_dict(self) -> dict:
-        return {"k": int(self.k)}
+        return {"k": int(self.k), "ts": float(self.ts)}
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "SessionState":
-        k = to_int(d.get("k", 1)) if isinstance(d, dict) else None
-        return cls(k=max(k, 1)) if k is not None else cls()
+        if not isinstance(d, dict):
+            return cls()
+        k = to_int(d.get("k", 1))
+        ts = to_float(d.get("ts"))
+        now = time.time()
+        # 旧版本没有 ts：按“现在”处理，之后随活跃更新；异常值（未来时间、负数）同样回到现在
+        ts = ts if ts is not None and 0 < ts <= now else now
+        return cls(k=max(k, 1) if k is not None else 1, ts=ts)
 
 
 @dataclass
@@ -308,6 +315,8 @@ class RoundInfo:
     k: int
     injected: bool
     ts: float = field(default_factory=time.time)
+    # 持有事件对象本身：pending 以 id(event) 为键，对象存活期间 id 不会被别的事件复用
+    ev: object = field(default=None, repr=False, compare=False)
 
 
 # --------------------------------------------------------------------------
@@ -340,16 +349,17 @@ def build_judge_prompt(template: str, instruction: str, reply: str,
                        user_text: str = "") -> str:
     tpl = (template.strip() if isinstance(template, str) else "") or DEFAULT_JUDGE_PROMPT
     user_block = f"用户的话：\n\"\"\"\n{user_text}\n\"\"\"\n\n" if user_text else ""
-    out = (tpl.replace("{instruction}", instruction or "")
-              .replace("{user}", user_block)
-              .replace("{reply}", reply))
+    vals = {"{instruction}": instruction or "", "{user}": user_block, "{reply}": reply}
+    # 一次性替换：被替换进去的内容（回复、用户消息）里即使含有占位符样式的文字，也不会被再次替换
+    out = re.sub(r"\{instruction\}|\{user\}|\{reply\}", lambda m: vals[m.group(0)], tpl)
     if "{reply}" not in tpl:  # 模板里没写 {reply}，把回复补在末尾
         out += f"\n\n机器人的回复：\n\"\"\"\n{reply}\n\"\"\""
     return out
 
 
-_YES = re.compile(r"^\W*(是|对|有|yes|y|true)", re.I)
-_NO = re.compile(r"^\W*(否|不|没|无|no|n|false)", re.I)
+# 只看回答的开头，但排除常见的误判：“是否……”“对不起……”“yesterday”“note”等
+_YES = re.compile(r"^\W*(是(?!否)|对(?![不起])|有|(yes|true|y)(?![a-z]))", re.I)
+_NO = re.compile(r"^\W*(否|不|没|无|(no|false|n)(?![a-z]))", re.I)
 
 
 def parse_yes_no(text: str | None) -> bool | None:

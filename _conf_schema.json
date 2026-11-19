@@ -97,31 +97,35 @@
     "default": 30,
     "slider": {"min": 1, "max": 300, "step": 1}
   },
-  "scope_mode": {
-    "description": "生效范围",
-    "type": "string",
-    "options": ["all", "persona", "session"],
-    "labels": [
-      "全部：对所有会话生效",
-      "指定人设：仅在使用所选人设的会话中生效",
-      "指定会话：仅对所选会话生效"
-    ],
-    "hint": "不在生效范围内的会话不会注入、不会计数、也不会判定。“指定人设”按会话当前实际使用的人设判断，会话中切换人设后立即按新人设重新判断。",
-    "default": "all"
-  },
-  "scope_persona": {
-    "description": "指定人设",
-    "type": "string",
-    "hint": "仅在“生效范围”为“指定人设”时使用。选择需要启用本插件的人设；会话当前使用的人设与所选一致时才会生效。无法确定会话人设时按不生效处理。",
-    "default": "",
-    "_special": "select_persona",
-    "condition": {"scope_mode": "persona"}
+  "only_user_requests": {
+    "description": "仅处理用户消息触发的请求",
+    "type": "bool",
+    "hint": "开启：后台唤醒、子代理，以及其他插件自行发起的 LLM 请求不注入、不计数、不判定，避免干扰概率曲线与统计。判断依据是请求内容是否包含用户本条消息。若发现本该生效的对话没有被处理（例如其他插件会改写用户消息），可关闭此项。",
+    "default": true
   },
   "scope_sessions": {
-    "description": "指定会话",
+    "description": "限定会话",
     "type": "list",
-    "hint": "仅在“生效范围”为“指定会话”时使用。填写会话标识（unified_msg_origin），每行一个；在目标会话中发送 /sid 即可获取。",
+    "hint": "选择需要启用本插件的会话，可多选。留空表示不按会话限定。与下方“限定人设”同时设置时，需两项同时满足才处理。",
     "default": [],
-    "condition": {"scope_mode": "session"}
+    "_special": "umo"
+  },
+  "scope_personas": {
+    "description": "限定人设",
+    "type": "list",
+    "hint": "填写需要启用本插件的人设 ID（即人设管理页中的人设名称），每行一个，可多个。留空表示不按人设限定。按会话当前实际使用的人设判断，切换人设后立即生效；无法确定会话人设时按不生效处理。与上方“限定会话”同时设置时，需两项同时满足才处理。在目标会话中发送 /风格状态 可查看该会话当前的人设 ID；填写了不存在的人设 ID 时，/风格状态 会给出提示。",
+    "default": []
+  },
+  "scope_mode": {
+    "description": "（旧版配置，已停用）",
+    "type": "string",
+    "default": "",
+    "invisible": true
+  },
+  "scope_persona": {
+    "description": "（旧版配置，已停用）",
+    "type": "string",
+    "default": "",
+    "invisible": true
   }
 }
