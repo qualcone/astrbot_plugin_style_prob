@@ -290,7 +290,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
             e.get_extra = lambda k, d=None: persona if k == "_trace_persona_id" else d
             return e
 
-        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_personas=["cat"])
+        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_persona="cat")
         hit, miss, unknown = make_req(), make_req(), make_req()
         await plugin.on_req(ev("cat"), hit)
         await plugin.on_req(ev("dog"), miss)
@@ -301,12 +301,12 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(plugin._pending), 1)  # 只有命中范围的那一轮被登记
 
     async def test_scope_persona_wildcard_and_fallbacks(self):
-        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_personas=["*"])
+        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_persona="*")
         self.assertTrue(plugin._in_scope("u1", "anything"))
         self.assertTrue(plugin._in_scope("u1", None))
-        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_personas=[])
+        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_persona="")
         self.assertFalse(plugin._in_scope("u1", "cat"))
-        self.assertTrue(any("人设列表为空" in w for w in plugin._config_warnings()))
+        self.assertTrue(any("未选择人设" in w for w in plugin._config_warnings()))
         plugin = make_plugin(FakeContext(), scope_mode="bogus")
         self.assertEqual(plugin._scope_mode(), "all")
 
@@ -327,7 +327,7 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext()
         ctx.persona_manager = PM()
         ctx.conversation_manager = CM("cat")
-        plugin = make_plugin(ctx, scope_mode="persona", scope_personas=["cat"])
+        plugin = make_plugin(ctx, scope_mode="persona", scope_persona="cat")
         self.assertEqual(await plugin._resolve_persona(make_event()), "cat")
         ctx.conversation_manager = CM(None)   # 会话未指定人设：回落到默认人设
         self.assertEqual(await plugin._resolve_persona(make_event()), "default")

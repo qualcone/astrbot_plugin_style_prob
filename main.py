@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import math
 import random
+import re
 import time
 
 from astrbot.api import AstrBotConfig, logger
@@ -88,7 +89,10 @@ class StyleProbPlugin(Star):
         return v if v in ("persona", "session") else "all"
 
     def _scope_personas(self) -> set[str]:
-        return set(core.clean_str_list(self.config.get("scope_personas", [])))
+        """配置页的人设选择器只返回单个 ID 字符串；这里也容忍逗号/换行分隔的多个，以及列表。"""
+        v = self.config.get("scope_persona", "")
+        items = v if isinstance(v, list) else re.split(r"[,，、\n]", v) if isinstance(v, str) else []
+        return {s.strip() for s in items if isinstance(s, str) and s.strip()}
 
     def _in_scope(self, umo: str, persona_id: str | None = None) -> bool:
         mode = self._scope_mode()
@@ -152,7 +156,7 @@ class StyleProbPlugin(Star):
         if self._scope_mode() == "session" and not self._scope_sessions():
             warns.append("生效范围是“指定会话”，但会话列表为空，当前不会对任何会话生效")
         if self._scope_mode() == "persona" and not self._scope_personas():
-            warns.append("生效范围是“指定人设”，但人设列表为空，当前不会对任何会话生效")
+            warns.append("生效范围是“指定人设”，但未选择人设，当前不会对任何会话生效")
         return warns
 
     # ------------------------------------------------------------------ 持久化

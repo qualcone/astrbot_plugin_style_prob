@@ -2,6 +2,11 @@
 
 本文件记录各版本的主要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.2] - 2026-11-19
+
+### 修复
+- 修复选择“指定人设”后配置无法保存的问题（提示“scope_personas: 期望是 list, 得到了 str”）：AstrBot 的人设选择器为单选，返回字符串，配置项由列表型 `scope_personas` 改为字符串型 `scope_persona`。目前一次只能选择一个人设。
+
 ## [v0.1.1] - 2026-11-19
 
 ### 新增
@@ -29,5 +34,6 @@
 - 全部数字配置的范围校验，无效值回退为默认值并在 `/风格状态` 中提示。
 - 可选的关键词预判、仅对已注入回复判定、判定超时、按会话限定生效范围。
 
+[v0.1.2]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.2
 [v0.1.1]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.0

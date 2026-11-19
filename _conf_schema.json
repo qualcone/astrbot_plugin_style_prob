@@ -109,12 +109,12 @@
     "hint": "不在生效范围内的会话不会注入、不会计数、也不会判定。“指定人设”按会话当前实际使用的人设判断，会话中切换人设后立即按新人设重新判断。",
     "default": "all"
   },
-  "scope_personas": {
+  "scope_persona": {
     "description": "指定人设",
-    "type": "list",
-    "hint": "仅在“生效范围”为“指定人设”时使用。选择需要启用本插件的人设；会话当前使用的人设在列表内才会生效。无法确定会话人设时按不生效处理。",
-    "default": [],
-    "_special": "persona_pool",
+    "type": "string",
+    "hint": "仅在“生效范围”为“指定人设”时使用。选择需要启用本插件的人设；会话当前使用的人设与所选一致时才会生效。无法确定会话人设时按不生效处理。",
+    "default": "",
+    "_special": "select_persona",
     "condition": {"scope_mode": "persona"}
   },
   "scope_sessions": {
