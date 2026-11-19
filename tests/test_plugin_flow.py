@@ -276,6 +276,63 @@ class PluginFlow(unittest.IsolatedAsyncioTestCase):
         await plugin.on_req(make_event("u1"), req)
         self.assertEqual(req.prompt, "你好")
 
+    async def test_scope_session_mode(self):
+        plugin = make_plugin(FakeContext(), scope_mode="session", scope_sessions=["u1"])
+        req_in, req_out = make_req(), make_req()
+        await plugin.on_req(make_event("u1"), req_in)
+        await plugin.on_req(make_event("u2"), req_out)
+        self.assertIn("请撒娇", req_in.prompt)
+        self.assertEqual(req_out.prompt, "你好")
+
+    async def test_scope_persona_mode(self):
+        def ev(persona):
+            e = make_event()
+            e.get_extra = lambda k, d=None: persona if k == "_trace_persona_id" else d
+            return e
+
+        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_personas=["cat"])
+        hit, miss, unknown = make_req(), make_req(), make_req()
+        await plugin.on_req(ev("cat"), hit)
+        await plugin.on_req(ev("dog"), miss)
+        await plugin.on_req(ev(None), unknown)   # 取不到人设：按不生效处理
+        self.assertIn("请撒娇", hit.prompt)
+        self.assertEqual(miss.prompt, "你好")
+        self.assertEqual(unknown.prompt, "你好")
+        self.assertEqual(len(plugin._pending), 1)  # 只有命中范围的那一轮被登记
+
+    async def test_scope_persona_wildcard_and_fallbacks(self):
+        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_personas=["*"])
+        self.assertTrue(plugin._in_scope("u1", "anything"))
+        self.assertTrue(plugin._in_scope("u1", None))
+        plugin = make_plugin(FakeContext(), scope_mode="persona", scope_personas=[])
+        self.assertFalse(plugin._in_scope("u1", "cat"))
+        self.assertTrue(any("人设列表为空" in w for w in plugin._config_warnings()))
+        plugin = make_plugin(FakeContext(), scope_mode="bogus")
+        self.assertEqual(plugin._scope_mode(), "all")
+
+    async def test_resolve_persona_fallback_chain(self):
+        class PM:
+            default_persona = "default"
+
+        class CM:
+            def __init__(self, pid):
+                self.pid = pid
+
+            async def get_curr_conversation_id(self, umo):
+                return "c1"
+
+            async def get_conversation(self, umo, cid):
+                return SimpleNamespace(persona_id=self.pid)
+
+        ctx = FakeContext()
+        ctx.persona_manager = PM()
+        ctx.conversation_manager = CM("cat")
+        plugin = make_plugin(ctx, scope_mode="persona", scope_personas=["cat"])
+        self.assertEqual(await plugin._resolve_persona(make_event()), "cat")
+        ctx.conversation_manager = CM(None)   # 会话未指定人设：回落到默认人设
+        self.assertEqual(await plugin._resolve_persona(make_event()), "default")
+        self.assertIsNone(await make_plugin(FakeContext())._resolve_persona(make_event()))
+
     async def test_judge_does_not_block_and_hit_resets(self):
         ctx = FakeContext(answer="是", delay=0.4)
         plugin = make_plugin(ctx)

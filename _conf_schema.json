@@ -1,105 +1,127 @@
 {
   "enabled": {
-    "description": "是否启用",
+    "description": "启用插件",
     "type": "bool",
+    "hint": "总开关。关闭后不再注入风格指令，也不再计数与判定；已保存的计数与统计数据保留。",
     "default": true
   },
   "style_instruction": {
-    "description": "风格指令文本",
+    "description": "风格指令",
     "type": "text",
-    "hint": "命中概率时，这句话会被追加到本轮用户消息的末尾（不会改动 system prompt）。内容完全自定义：语气、口癖、表情、格式、话题引导等均可。",
+    "hint": "命中注入概率时，该文本会被追加到本轮用户消息的末尾，不会改动 system prompt 与历史消息。内容不限，可描述语气、口癖、表情、格式、话题引导等任意表达风格。为空时插件不执行任何注入。",
     "default": "（本条回复请使用更轻松、口语化的语气。）"
   },
   "inject_mode": {
     "description": "注入方式",
     "type": "string",
     "options": ["temp_part", "prompt"],
-    "labels": ["临时内容块（推荐：不写入历史，需 AstrBot>=4.24，不可用时自动回退）", "追加到用户消息文本（会写入历史）"],
-    "hint": "两种都只改本轮用户消息末尾，不动 system prompt。temp_part：历史里没有风格指令，代价是被注入那一轮的下一轮有一小段缓存重算；prompt：指令留在历史里，缓存命中最好，但模型会看到过去几轮的风格指令。",
+    "labels": [
+      "临时内容块（推荐）：不写入会话历史",
+      "追加到用户消息文本：写入会话历史"
+    ],
+    "hint": "两种方式均只修改本轮用户消息的末尾，不修改 system prompt。临时内容块：风格指令不进入历史，代价是被注入那一轮的下一轮，需要重新计算一小段前缀缓存；要求 AstrBot 版本不低于 4.24，不可用时自动回退为“追加到用户消息文本”。追加到用户消息文本：指令随该消息写入历史，后续轮次前缀完全一致，缓存命中率最高，但模型会在历史中看到此前轮次的风格指令，可能影响后续回复。",
     "default": "temp_part"
   },
   "intensity": {
-    "description": "出现频率档位",
+    "description": "注入频率档位",
     "type": "string",
     "options": ["low", "mid", "high", "custom"],
     "labels": [
-      "低：约每 16 条触发一次（p0 0.02 → p_max 0.15，30 步）",
-      "中：约每 8 条触发一次（p0 0.05 → p_max 0.35，20 步）",
-      "高：约每 4 条触发一次（p0 0.15 → p_max 0.70，10 步）",
-      "自定义：使用下面三项"
+      "低：平均约每 16 条消息注入一次（p0 0.02 → p_max 0.15，30 步）",
+      "中：平均约每 8 条消息注入一次（p0 0.05 → p_max 0.35，20 步）",
+      "高：平均约每 4 条消息注入一次（p0 0.15 → p_max 0.70，10 步）",
+      "自定义：手动设置初始概率、概率上限与爬升步数"
     ],
-    "hint": "这是“被注入”的理论平均间隔，模型不一定照做，实际出现频率会更低。选低/中/高时，下面的 p0、p_max、上升步数不生效。",
+    "hint": "决定风格指令被注入的平均频率。所列间隔为注入的理论平均值；模型不一定完全遵循指令，实际出现频率通常低于该值，可通过 /风格统计 查看实测结果。选择“自定义”后，下方三项参数才会显示并生效。",
     "default": "mid"
   },
   "p0": {
-    "description": "初始概率 p_0（仅自定义档）",
+    "description": "初始概率 p0",
     "type": "float",
-    "hint": "触发后第 1 条消息的注入概率，范围 0~1。",
+    "hint": "触发后第 1 条消息的注入概率，取值范围 0~1 的小数（0.05 表示 5%，不要填 5）。无效值将回退为默认值 0.05，并在 /风格状态 中给出提示。",
     "default": 0.05,
-    "slider": {"min": 0, "max": 1, "step": 0.01}
+    "slider": {"min": 0, "max": 1, "step": 0.01},
+    "condition": {"intensity": "custom"}
   },
   "p_max": {
-    "description": "最高概率 p_max（仅自定义档）",
+    "description": "概率上限 p_max",
     "type": "float",
-    "hint": "概率爬升的上限，范围 0~1。若小于 p_0 则按 p_0 处理。",
+    "hint": "注入概率爬升的上限，取值范围 0~1 的小数。小于 p0 时按 p0 处理（概率保持恒定）。无效值将回退为默认值 0.35。",
     "default": 0.35,
-    "slider": {"min": 0, "max": 1, "step": 0.01}
+    "slider": {"min": 0, "max": 1, "step": 0.01},
+    "condition": {"intensity": "custom"}
   },
   "ramp_steps": {
-    "description": "上升步数 n（仅自定义档）",
+    "description": "爬升步数 n",
     "type": "int",
-    "hint": "从 p_0 线性升到 p_max 用多少条消息；之后一直保持 p_max。0 表示直接用 p_max。范围 0~1000 的整数。",
+    "hint": "注入概率从 p0 线性上升到 p_max 所经过的消息条数，取值范围 0~10000 的整数；达到后保持 p_max。0 表示直接使用 p_max。无效值将回退为默认值 20。",
     "default": 20,
-    "slider": {"min": 0, "max": 1000, "step": 1}
+    "slider": {"min": 0, "max": 1000, "step": 1},
+    "condition": {"intensity": "custom"}
   },
   "judge_provider": {
-    "description": "判定模型提供商",
+    "description": "判定模型",
     "type": "string",
-    "hint": "建议选便宜的小模型。留空则使用当前会话的聊天模型。",
+    "hint": "用于判断回复是否体现了目标风格。判定任务简单，建议选择响应快、成本低的非推理模型。留空时使用当前会话的聊天模型。",
     "default": "",
     "_special": "select_provider"
   },
   "judge_prompt": {
     "description": "判定提示词",
     "type": "text",
-    "hint": "可用占位符：{instruction}=风格指令，{reply}=机器人回复，{user}=用户那一句（需开启下面的选项）。要求模型只回答“是”或“否”。留空使用内置模板。",
+    "hint": "留空时使用内置模板：以风格指令为判定标准，要求模型仅回答“是”或“否”。自定义时可使用占位符：{instruction}（风格指令）、{reply}（机器人回复）、{user}（用户消息，需开启“判定时附带用户消息”）。模型的回答需以“是”或“否”开头；无法解析的回答视为判定失败，本轮不更新状态。",
     "default": ""
   },
   "judge_include_user": {
-    "description": "判定时附带用户那一句",
+    "description": "判定时附带用户消息",
     "type": "bool",
+    "hint": "开启后，判定请求中会附带触发本次回复的用户消息，供判定模型结合语境判断。关闭时仅提供机器人回复。无论是否开启，判定请求均不包含历史对话。",
     "default": false
   },
   "keyword_hints": {
-    "description": "关键词快速判定（可选）",
+    "description": "关键词预判",
     "type": "list",
-    "hint": "回复里出现任一关键词就直接判为“出现”，不再调用模型；都没出现时再交给判定模型。",
+    "hint": "可选。回复中包含任一关键词时直接判定为“已出现”，不调用判定模型；均不包含时再交由判定模型判断。适用于带有明确特征词的风格（如固定口癖）。每项一个关键词，区分大小写。",
     "default": []
   },
   "judge_only_when_injected": {
-    "description": "仅在注入时判定",
+    "description": "仅对已注入的回复判定",
     "type": "bool",
-    "hint": "开启：只有本轮注入了风格指令才判定。关闭：每轮都判（模型自己说出该风格也会重置概率，但每轮都会多一次模型调用）。",
+    "hint": "开启：仅在本轮注入了风格指令时调用判定模型，调用量最少。关闭：对每条回复都进行判定，模型自发出现的目标风格也会使计数重置，但每条回复都会增加一次模型调用。",
     "default": true
   },
   "judge_timeout": {
     "description": "判定超时（秒）",
     "type": "int",
-    "hint": "范围 1~300 的整数。超时的判定本轮不更新状态。",
+    "hint": "单次判定的最长等待时间，取值范围 1~300 的整数。超时视为判定失败，本轮不更新状态，不影响回复的发送。无效值将回退为默认值 30。",
     "default": 30,
     "slider": {"min": 1, "max": 300, "step": 1}
   },
   "scope_mode": {
     "description": "生效范围",
     "type": "string",
-    "options": ["all", "specified"],
-    "labels": ["全部会话", "仅指定会话"],
+    "options": ["all", "persona", "session"],
+    "labels": [
+      "全部：对所有会话生效",
+      "指定人设：仅在使用所选人设的会话中生效",
+      "指定会话：仅对所选会话生效"
+    ],
+    "hint": "不在生效范围内的会话不会注入、不会计数、也不会判定。“指定人设”按会话当前实际使用的人设判断，会话中切换人设后立即按新人设重新判断。",
     "default": "all"
   },
-  "scope_sessions": {
-    "description": "指定会话列表",
+  "scope_personas": {
+    "description": "指定人设",
     "type": "list",
-    "hint": "生效范围为“仅指定会话”时使用。填会话的 unified_msg_origin（可在聊天里用 /sid 查看），一行一个。",
-    "default": []
+    "hint": "仅在“生效范围”为“指定人设”时使用。选择需要启用本插件的人设；会话当前使用的人设在列表内才会生效。无法确定会话人设时按不生效处理。",
+    "default": [],
+    "_special": "persona_pool",
+    "condition": {"scope_mode": "persona"}
+  },
+  "scope_sessions": {
+    "description": "指定会话",
+    "type": "list",
+    "hint": "仅在“生效范围”为“指定会话”时使用。填写会话标识（unified_msg_origin），每行一个；在目标会话中发送 /sid 即可获取。",
+    "default": [],
+    "condition": {"scope_mode": "session"}
   }
 }

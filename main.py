@@ -80,10 +80,62 @@ class StyleProbPlugin(Star):
     def _keywords(self) -> list[str]:
         return core.clean_str_list(self.config.get("keyword_hints", []))
 
-    def _in_scope(self, umo: str) -> bool:
-        if self.config.get("scope_mode", "all") != "specified":
-            return True
-        return umo in self._scope_sessions()
+    def _scope_mode(self) -> str:
+        """all / persona / session。旧版本的 "specified" 等同于 session；无法识别时按 all 处理。"""
+        v = self.config.get("scope_mode", "all")
+        if v == "specified":
+            return "session"
+        return v if v in ("persona", "session") else "all"
+
+    def _scope_personas(self) -> set[str]:
+        return set(core.clean_str_list(self.config.get("scope_personas", [])))
+
+    def _in_scope(self, umo: str, persona_id: str | None = None) -> bool:
+        mode = self._scope_mode()
+        if mode == "session":
+            return umo in self._scope_sessions()
+        if mode == "persona":
+            personas = self._scope_personas()
+            if "*" in personas:  # AstrBot 人设选择器里“全部”对应 *
+                return True
+            return persona_id is not None and persona_id in personas
+        return True
+
+    async def _resolve_persona(self, event) -> str | None:
+        """当前会话实际使用的人设 ID；取不到返回 None。
+
+        依次尝试：AstrBot 在构建请求时记录的结果 → 人设管理器按会话配置解析 →
+        旧版本的会话级人设（会话未指定时回落到默认人设）。"""
+        try:
+            pid = event.get_extra("_trace_persona_id")
+            if isinstance(pid, str) and pid:
+                return pid
+        except Exception:
+            pass
+        umo = event.unified_msg_origin
+        pm = getattr(self.context, "persona_manager", None)
+        try:
+            resolve = getattr(pm, "resolve_selected_persona", None)
+            if resolve is not None:
+                pid, _persona, _special = await resolve(
+                    umo=umo, platform_name=event.get_platform_name())
+                if isinstance(pid, str) and pid:
+                    return pid
+        except Exception as e:
+            logger.debug(f"[style_prob] resolve_selected_persona 不可用: {e!r}")
+        try:
+            cm = self.context.conversation_manager
+            cid = await cm.get_curr_conversation_id(umo)
+            conv = await cm.get_conversation(umo, cid) if cid else None
+            pid = getattr(conv, "persona_id", None)
+            if isinstance(pid, str) and pid:
+                return pid
+            default = getattr(pm, "default_persona", None)
+            if isinstance(default, str) and default:
+                return default
+        except Exception as e:
+            logger.debug(f"[style_prob] 读取会话人设失败: {e!r}")
+        return None
 
     def _config_warnings(self) -> list[str]:
         """当前配置里有问题的地方，给 /风格状态 展示。"""
@@ -97,8 +149,10 @@ class StyleProbPlugin(Star):
         if t is None or not 1 <= t <= 300:
             warns.append(f"判定超时 = {self.config.get('judge_timeout')!r} 无效（需要 1~300 的整数秒），"
                          f"已改用 {self._timeout()}")
-        if self.config.get("scope_mode", "all") == "specified" and not self._scope_sessions():
-            warns.append("生效范围是“仅指定会话”，但会话列表为空，当前不会对任何会话生效")
+        if self._scope_mode() == "session" and not self._scope_sessions():
+            warns.append("生效范围是“指定会话”，但会话列表为空，当前不会对任何会话生效")
+        if self._scope_mode() == "persona" and not self._scope_personas():
+            warns.append("生效范围是“指定人设”，但人设列表为空，当前不会对任何会话生效")
         return warns
 
     # ------------------------------------------------------------------ 持久化
@@ -178,7 +232,15 @@ class StyleProbPlugin(Star):
             return
         instruction = self._instruction()
         umo = event.unified_msg_origin
-        if not instruction or not self._in_scope(umo):
+        if not instruction:
+            return
+        persona_id = None
+        if self._scope_mode() == "persona":
+            persona_id = await self._resolve_persona(event)
+            if persona_id is None and "persona_unknown" not in self._warned:
+                self._warned.add("persona_unknown")
+                logger.warning("[style_prob] 无法确定当前会话的人设，按“指定人设”范围处理为不生效")
+        if not self._in_scope(umo, persona_id):
             return
         key = id(event)
         if key in self._pending:  # 同一事件内的重复请求（如工具调用循环）不再抽样
@@ -409,10 +471,12 @@ class StyleProbPlugin(Star):
         st = await self._get_state(umo)
         stats = await self._get_stats()
         p = core.prob_at(st.k, *self._params())
-        scope = "是" if self._in_scope(umo) else "否（不在生效范围内）"
+        persona_id = await self._resolve_persona(event) if self._scope_mode() == "persona" else None
+        scope = "是" if self._in_scope(umo, persona_id) else "否（不在生效范围内）"
+        persona_note = f"；当前人设：{persona_id or '未知'}" if self._scope_mode() == "persona" else ""
         text = (
             f"当前会话：距上次触发已过 {st.k - 1} 条消息，下一条为第 k = {st.k} 条，注入概率 {p:.3f}\n"
-            f"强度档位：{core.PRESET_LABELS[self._intensity()]}；本会话在生效范围内：{scope}\n"
+            f"强度档位：{core.PRESET_LABELS[self._intensity()]}；本会话在生效范围内：{scope}{persona_note}\n"
             f"累计（全部会话）：注入 {stats['injected']} 次，判定 {stats['judged']} 次，"
             f"判为出现 {stats['hits']} 次，已记录 {len(stats['intervals'])} 个触发间隔"
         )
