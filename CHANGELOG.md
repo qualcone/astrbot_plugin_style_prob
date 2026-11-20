@@ -2,6 +2,11 @@
 
 本文件记录各版本的主要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.8] - 2026-11-20
+
+### 修复
+- 内置判定模板：风格指令里含有“三种轮着用，同一种不要连着出现”这类需要对照多条消息才能判断的规则时，判定模型会因为单条回复无法满足而判“否”，导致明显出现了风格也被判为未出现。现在模板先向判定模型说明背景（风格说明是临时追加到这一轮的，判定结果用来统计风格出现频率），并明确要求只看这一条回复里是否出现了所描述的风格，忽略轮流、频率、不要连续重复等跨消息规则，列举的例子只作示意，只有完全看不出特征才判“否”。
+
 ## [v0.1.7] - 2026-11-20
 
 ### 新增
@@ -77,6 +82,7 @@
 - 全部数字配置的范围校验，无效值回退为默认值并在 `/风格状态` 中提示。
 - 可选的关键词预判、仅对已注入回复判定、判定超时、按会话限定生效范围。
 
+[v0.1.8]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.8
 [v0.1.7]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.7
 [v0.1.6]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.6
 [v0.1.5]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.5
