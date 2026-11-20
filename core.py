@@ -314,6 +314,7 @@ class RoundInfo:
     umo: str
     k: int
     injected: bool
+    prob: float = 0.0  # 抽样时用的注入概率，供“最近注入记录”显示
     ts: float = field(default_factory=time.time)
     # 持有事件对象本身：pending 以 id(event) 为键，对象存活期间 id 不会被别的事件复用
     ev: object = field(default=None, repr=False, compare=False)

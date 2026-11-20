@@ -345,5 +345,122 @@ class WebStatus(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("RuntimeError", r["message"])                      # 不把内部异常细节暴露给前端
 
 
+class RoundRecords(unittest.IsolatedAsyncioTestCase):
+    async def _round(self, plugin, umo="u1", reply="喵～今天也要加油哦", answer=None):
+        e = ev(umo)
+        await plugin.on_req(e, make_req())
+        await plugin.on_resp(e, make_resp(reply))
+        await plugin._wait_tasks()
+
+    async def test_only_injected_rounds_are_recorded(self):
+        yes = make_plugin(FakeContext(answer="是", delay=0.0))
+        await self._round(yes)
+        no_inject = make_plugin(FakeContext(delay=0.0), p0=0.0, p_max=0.0)
+        await self._round(no_inject)
+        self.assertEqual(len(yes._recent), 1)
+        self.assertEqual(len(no_inject._recent), 0)           # 没被注入的轮次不记录
+
+    async def test_record_fields_and_result(self):
+        plugin = make_plugin(FakeContext(answer="是", delay=0.0))
+        plugin._states["u1"] = core.SessionState(k=4)
+        await self._round(plugin)
+        r = plugin._recent[0]
+        self.assertEqual((r["umo"], r["k"], r["result"]), ("u1", 4, "hit"))
+        self.assertAlmostEqual(r["prob"], 1.0)
+        self.assertIsInstance(r["ms"], int)
+        self.assertEqual(r["snippet"], "喵～今天也要加油哦")
+
+    async def test_miss_and_failed_results(self):
+        miss = make_plugin(FakeContext(answer="否", delay=0.0))
+        await self._round(miss)
+        self.assertEqual(miss._recent[0]["result"], "miss")
+
+        class Boom(FakeContext):
+            async def llm_generate(self, **kw):
+                raise RuntimeError("down")
+        failed = make_plugin(Boom())
+        await self._round(failed)
+        self.assertEqual(failed._recent[0]["result"], "failed")
+
+    async def test_pending_until_judged(self):
+        plugin = make_plugin(FakeContext(answer="是", delay=0.2))
+        e = ev("u1")
+        await plugin.on_req(e, make_req())
+        await plugin.on_resp(e, make_resp("喵"))
+        self.assertEqual(plugin._recent[0]["result"], "pending")
+        await plugin._wait_tasks()
+        self.assertEqual(plugin._recent[0]["result"], "hit")
+
+    async def test_snippet_is_truncated_and_single_line(self):
+        plugin = make_plugin(FakeContext(answer="是", delay=0.0))
+        await self._round(plugin, reply="第一行\n" + "字" * 100)
+        snip = plugin._recent[0]["snippet"]
+        self.assertNotIn("\n", snip)
+        self.assertLessEqual(len(snip), plugin_main.SNIPPET_CHARS + 1)
+        self.assertTrue(snip.endswith("…"))
+
+    async def test_capacity_is_bounded_and_newest_first_in_snapshot(self):
+        plugin = make_plugin(FakeContext(answer="否", delay=0.0))
+        old_cap = plugin_main.RECENT_ROUNDS
+        plugin._recent = type(plugin._recent)(maxlen=5)
+        for i in range(8):
+            await self._round(plugin, umo=f"u{i}")
+        self.assertEqual(len(plugin._recent), 5)
+        d = await plugin._snapshot()
+        self.assertEqual([r["umo"] for r in d["recent"]], ["u7", "u6", "u5", "u4", "u3"])
+        self.assertEqual(d["recent_limit"], old_cap)
+        import json
+        json.dumps(d)
+
+    async def test_log_line_controlled_by_switch(self):
+        import logging
+        records = []
+
+        class H(logging.Handler):
+            def emit(self, rec):
+                records.append(rec.getMessage())
+
+        # 测试用的 astrbot.api 桩里的 logger 是标准 logging
+        lg = plugin_main.logger
+        h = H()
+        lg.addHandler(h)
+        old = lg.level
+        lg.setLevel(logging.DEBUG)
+        try:
+            on = make_plugin(FakeContext(answer="是", delay=0.0))
+            await self._round(on)
+            self.assertTrue(any("已注入" in m and "判定=出现" in m and "u1" in m for m in records), records)
+            records.clear()
+            off = make_plugin(FakeContext(answer="是", delay=0.0), log_rounds=False)
+            await self._round(off)
+            self.assertFalse(any("已注入" in m for m in records))
+            self.assertEqual(len(off._recent), 1)                           # 关日志不影响内存记录
+        finally:
+            lg.removeHandler(h)
+            lg.setLevel(old)
+
+    async def test_clear_command_empties_records(self):
+        plugin = make_plugin(FakeContext(answer="是", delay=0.0))
+        await self._round(plugin)
+        _ = [x async for x in plugin.cmd_clear(make_event("u1"))]
+        self.assertEqual(len(plugin._recent), 0)
+
+    async def test_memory_footprint_is_small(self):
+        import tracemalloc
+        plugin = make_plugin(FakeContext())
+        tracemalloc.start()
+        before = tracemalloc.take_snapshot()
+        for i in range(plugin_main.RECENT_ROUNDS * 2):                      # 写满并滚动一圈
+            plugin._recent.append({"ts": time.time(), "umo": f"aiocqhttp:GroupMessage:{100000000 + i}",
+                                   "k": i, "prob": 0.35, "result": "hit", "ms": 812,
+                                   "snippet": "字" * plugin_main.SNIPPET_CHARS + "…"})
+        after = tracemalloc.take_snapshot()
+        used = sum(s.size_diff for s in after.compare_to(before, "filename"))
+        tracemalloc.stop()
+        self.assertEqual(len(plugin._recent), plugin_main.RECENT_ROUNDS)
+        print(f"\n[内存] {plugin_main.RECENT_ROUNDS} 条最近注入记录约占 {used / 1024:.0f} KiB")
+        self.assertLess(used, 300 * 1024)
+
+
 if __name__ == "__main__":
     unittest.main()

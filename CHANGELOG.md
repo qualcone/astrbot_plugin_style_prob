@@ -2,6 +2,13 @@
 
 本文件记录各版本的主要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.5] - 2026-11-20
+
+### 新增
+- 注入记录：每次被注入的轮次记录会话、第几条、注入概率、判定结果（出现 / 未出现 / 判定失败）、判定用时和回复开头约 30 个字。只记录被注入的轮次。
+- 「频率状态」页新增“最近注入记录”表格：最多保留最近 200 条，仅保存在内存中（约 100 KiB），重启后清空。
+- 配置项“记录每次注入的日志”（默认开启）：每次注入并完成判定时写一行日志；关闭后页面里的记录不受影响。
+
 ## [v0.1.4] - 2026-11-19
 
 ### 新增
@@ -58,6 +65,7 @@
 - 全部数字配置的范围校验，无效值回退为默认值并在 `/风格状态` 中提示。
 - 可选的关键词预判、仅对已注入回复判定、判定超时、按会话限定生效范围。
 
+[v0.1.5]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.5
 [v0.1.4]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.3
 [v0.1.2]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.2

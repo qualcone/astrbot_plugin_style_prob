@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import math
 import random
 import re
@@ -26,6 +27,8 @@ FLUSH_DELAY = 2.0  # 状态变化后延迟多少秒合并写入存储（同一�
 MAX_STATES_IN_MEMORY = 1000  # 内存里最多缓存多少个会话的状态，超出时淘汰最久没活跃的
 IDLE_DAYS = 90  # 超过多少天没有活跃的会话，其计数从存储里清理
 PRUNE_INTERVAL = 24 * 3600  # 清理不活跃会话的检查间隔（秒）
+RECENT_ROUNDS = 200  # 内存里保留多少条“最近注入记录”（只在内存，重启清空）
+SNIPPET_CHARS = 30   # 记录里最多保留回复开头多少个字
 
 
 class StyleProbPlugin(Star):
@@ -47,6 +50,7 @@ class StyleProbPlugin(Star):
         self._last_prune = 0.0
         self._judge_sem = asyncio.Semaphore(JUDGE_CONCURRENCY)  # 限制同时进行的判定调用数
         self._warned: set[str] = set()
+        self._recent: collections.deque = collections.deque(maxlen=RECENT_ROUNDS)
         self._migrate_scope()
         self._register_web()
 
@@ -269,6 +273,8 @@ class StyleProbPlugin(Star):
             "interval_count": len(ivs),
             "session_count": len(index),
             "sessions": rows[: self.SNAPSHOT_SESSIONS],
+            "recent": list(self._recent)[::-1],  # 最新的在前
+            "recent_limit": RECENT_ROUNDS,
             "server_time": time.time(),
         }
 
@@ -453,7 +459,7 @@ class StyleProbPlugin(Star):
         if injected:
             # 只动本轮用户消息末尾；system_prompt、contexts 保持原样以保护缓存前缀
             injected = self._inject(req, instruction)
-        self._pending[key] = core.RoundInfo(umo=umo, k=st.k, injected=injected, ev=event)
+        self._pending[key] = core.RoundInfo(umo=umo, k=st.k, injected=injected, prob=p, ev=event)
 
     def _is_user_turn(self, event, req) -> bool:
         """这次请求是不是由用户消息触发的。后台唤醒、子代理，以及其他插件自己发起的 LLM 请求
@@ -521,8 +527,15 @@ class StyleProbPlugin(Star):
         if do_judge and self._flag("judge_include_user", False):
             user_text = (event.get_message_str() or "").strip()
 
+        rec = None
+        if info.injected:  # 只记录被注入的轮次；判定结果在后台任务里补上
+            snippet = reply.replace("\n", " ")
+            rec = {"ts": time.time(), "umo": info.umo, "k": info.k, "prob": info.prob,
+                   "result": "pending", "ms": None,
+                   "snippet": snippet[:SNIPPET_CHARS] + ("…" if len(snippet) > SNIPPET_CHARS else "")}
+            self._recent.append(rec)
         # 不 await：判定与落盘都放到后台任务，立即返回，不拖慢回复发送
-        self._spawn(self._finish_round(info, reply, user_text, do_judge))
+        self._spawn(self._finish_round(info, reply, user_text, do_judge, rec))
 
     # ------------------------------------------------------------------ 后台任务
     def _spawn(self, coro):
@@ -537,12 +550,16 @@ class StyleProbPlugin(Star):
             self._pending.pop(k, None)
 
     async def _finish_round(self, info: core.RoundInfo, reply: str,
-                            user_text: str, do_judge: bool):
+                            user_text: str, do_judge: bool, rec: dict | None = None):
         try:
             await self._persist(info.umo)
             if not do_judge:
+                self._finish_record(rec, "skipped", None)
                 return
+            t0 = time.perf_counter()
             hit = await self._judge(info.umo, reply, user_text)
+            ms = int((time.perf_counter() - t0) * 1000)
+            self._finish_record(rec, "failed" if hit is None else "hit" if hit else "miss", ms)
             stats = await self._get_stats()
             if hit is None:
                 stats["judge_failed"] += 1
@@ -564,6 +581,16 @@ class StyleProbPlugin(Star):
             raise
         except Exception as e:  # 后台任务的异常不能悄悄吞掉
             logger.error(f"[style_prob] 判定任务失败: {e!r}")
+
+    def _finish_record(self, rec: dict | None, result: str, ms: int | None):
+        """补全“最近注入记录”里这一轮的判定结果，并按配置写一行日志。"""
+        if rec is None:
+            return
+        rec["result"], rec["ms"] = result, ms
+        if self._flag("log_rounds", True):
+            label = {"hit": "出现", "miss": "未出现", "failed": "判定失败", "skipped": "未判定"}[result]
+            logger.info(f"[style_prob] 已注入 会话={rec['umo']} 第{rec['k']}条 概率={rec['prob']:.3f} "
+                        f"判定={label} 用时={'-' if ms is None else ms}ms 回复开头={rec['snippet']!r}")
 
     # ------------------------------------------------------------------ 判定
     async def _judge(self, umo: str, reply: str, user_text: str, *,
@@ -729,6 +756,7 @@ class StyleProbPlugin(Star):
             self._pending.clear()
             self._dirty.clear()
             self._stats_dirty = False
+            self._recent.clear()
             self._index = []
             self._stats = None
         yield event.plain_result(f"已清空：{count} 个会话的计数与全部统计数据，所有会话从 k = 1 重新开始。")

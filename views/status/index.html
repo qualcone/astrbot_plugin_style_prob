@@ -60,6 +60,10 @@
 <p class="sub" id="sessionsHint"></p>
 <div id="sessions"></div>
 
+<h2>最近注入记录</h2>
+<p class="sub" id="recentHint"></p>
+<div id="recent"></div>
+
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
@@ -86,6 +90,33 @@
     c.appendChild(el("div", "v", v));
     if (s) c.appendChild(el("div", "s", s));
     return c;
+  }
+
+  var RESULT = { hit: "出现", miss: "未出现", failed: "判定失败", pending: "判定中…", skipped: "未判定" };
+
+  function renderRecent(d) {
+    var box = $("recent"), rows = d.recent || [];
+    box.textContent = "";
+    $("recentHint").textContent = "只记录被注入的轮次，最多保留最近 " + (d.recent_limit || 200) +
+      " 条，仅保存在内存中，重启后清空；回复只保留开头一小段。";
+    if (!rows.length) { box.appendChild(el("div", "empty", "还没有注入记录")); return; }
+    var table = el("table"), head = el("tr");
+    ["时间", "会话", "第 k 条", "注入概率", "判定", "用时", "回复开头"].forEach(function (h) { head.appendChild(el("th", "", h)); });
+    table.appendChild(head);
+    rows.forEach(function (r) {
+      var tr = el("tr");
+      tr.appendChild(el("td", "num", new Date(r.ts * 1000).toLocaleTimeString()));
+      tr.appendChild(el("td", "umo", r.umo));
+      tr.appendChild(el("td", "num", "第 " + r.k + " 条"));
+      tr.appendChild(el("td", "num", pct(r.prob)));
+      var res = el("td", "num", RESULT[r.result] || r.result);
+      if (r.result === "failed") res.className += " err";
+      tr.appendChild(res);
+      tr.appendChild(el("td", "num", r.ms === null || r.ms === undefined ? "-" : r.ms + " ms"));
+      tr.appendChild(el("td", "", r.snippet));
+      table.appendChild(tr);
+    });
+    box.appendChild(table);
   }
 
   function render(d) {
@@ -115,6 +146,7 @@
     $("sessionsHint").textContent = "共 " + d.session_count + " 个有记录的会话，按最近活跃排序" +
       (d.session_count > rows.length ? "，仅显示最近 " + rows.length + " 个" : "") +
       "。“第 k 条”指下一条消息是自上次触发后的第几条。";
+    renderRecent(d);
     if (!rows.length) { box.appendChild(el("div", "empty", "还没有会话记录")); return; }
 
     var table = el("table"), head = el("tr");
