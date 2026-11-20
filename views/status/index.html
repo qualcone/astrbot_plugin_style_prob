@@ -3,19 +3,31 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>频率状态</title>
 <style>
+  /* 配色由页面自己定义（浅色 / 深色两套，均为不透明背景），不依赖宿主传来的颜色变量：
+     宿主的变量在部分情况下取不到深色值，会出现“深色字落在深色底上”看不清的问题。
+     深色与否由下方脚本判断后写到 <html data-theme>；脚本没跑起来时按系统偏好。 */
   :root {
-    --bg: var(--astrbot-color-background, #ffffff);
-    --surface: var(--astrbot-color-surface, #ffffff);
-    --text: var(--astrbot-color-text, #1b1c1d);
-    --muted: var(--astrbot-color-text-secondary, #000000aa);
-    --border: var(--astrbot-color-border, #d0d0d0);
-    --primary: var(--astrbot-color-primary, #3c96ca);
-    --error: var(--astrbot-color-error, #f44336);
+    color-scheme: light;
+    --bg: #ffffff; --surface: #ffffff; --text: #1b1c1d; --muted: #5f6368; --border: #d0d0d0;
+    --primary: #3c96ca; --error: #d93025; --track: #e3e5e8;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1a1a1a; --surface: #242424; --text: #e8eaed; --muted: #b4b8be; --border: #3a3a3a;
+    --primary: #5ba4d4; --error: #ff6b6d; --track: #3a3a3a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      color-scheme: dark;
+      --bg: #1a1a1a; --surface: #242424; --text: #e8eaed; --muted: #b4b8be; --border: #3a3a3a;
+      --primary: #5ba4d4; --error: #ff6b6d; --track: #3a3a3a;
+    }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 16px; background: transparent; color: var(--text);
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); min-height: 100vh;
          font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   h2 { font-size: 15px; margin: 20px 0 8px; }
@@ -37,7 +49,7 @@
   tr:last-child td { border-bottom: 0; }
   td.umo { word-break: break-all; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; max-width: 360px; }
   td.num { white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .meter { position: relative; height: 8px; min-width: 90px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .meter { position: relative; height: 8px; min-width: 90px; background: var(--track); border-radius: 4px; overflow: hidden; }
   .meter > i { position: absolute; inset: 0 auto 0 0; background: var(--primary); border-radius: 4px; }
   .empty { color: var(--muted); padding: 16px; text-align: center; }
   .err { color: var(--error); }
@@ -69,6 +81,22 @@
   var $ = function (id) { return document.getElementById(id); };
   var timer = null;
 
+  // 判断是否深色：宿主传来了真实的主题色时以它为准（背景亮度），否则看 isDark 或系统偏好。
+  function luminance(hex) {
+    var m = /^#?([0-9a-f]{6})/i.exec(String(hex || ""));
+    if (!m) return null;
+    var n = parseInt(m[1], 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  }
+  function applyTheme(ctx) {
+    var dark;
+    var lum = ctx && ctx.themeColors ? (luminance(ctx.themeColors.background) !== null ?
+      luminance(ctx.themeColors.background) : luminance(ctx.themeColors.surface)) : null;
+    if (lum !== null) dark = lum < 0.5 || (ctx && ctx.isDark === true);
+    else dark = !!(ctx && ctx.isDark === true) ||
+      !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+  }
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -188,7 +216,24 @@
 
   $("refresh").addEventListener("click", load);
   $("auto").addEventListener("change", schedule);
-  window.AstrBotPluginView.ready().then(function () { load(); schedule(); });
+  // 宿主的桥接脚本是由面板注入的，位置在本脚本之后时还没就绪：等页面加载完成再启动。
+  var started = false;
+  function start() {
+    var b = window.AstrBotPluginView;
+    if (started || !b) return;
+    started = true;
+    if (typeof b.onContext === "function") b.onContext(applyTheme);   // 宿主切换主题时会再次触发
+    else applyTheme(null);
+    b.ready().then(function () { load(); schedule(); });
+  }
+  applyTheme(null);                                                   // 先按系统偏好上色，避免白屏闪烁
+  if (window.AstrBotPluginView) start();
+  else {
+    window.addEventListener("load", start);
+    var tries = 0, poll = setInterval(function () {                   // 兜底：load 没触发时轮询几秒
+      if (window.AstrBotPluginView || ++tries > 50) { clearInterval(poll); start(); }
+    }, 100);
+  }
 })();
 </script>
 </body>

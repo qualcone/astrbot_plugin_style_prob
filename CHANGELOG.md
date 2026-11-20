@@ -2,6 +2,12 @@
 
 本文件记录各版本的主要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.6] - 2026-11-20
+
+### 修复
+- 「频率状态」页适配深色模式：此前在深色主题下，文字为深色、卡片为白色，文字几乎看不清。现在页面使用自己的浅色 / 深色两套不透明配色，依据宿主主题色或系统偏好自动选择，宿主切换主题时同步切换。
+- 页面启动不再依赖脚本加载顺序：宿主的桥接脚本较晚就绪时会等待，避免页面一直停在“加载中”。
+
 ## [v0.1.5] - 2026-11-20
 
 ### 新增
@@ -65,6 +71,7 @@
 - 全部数字配置的范围校验，无效值回退为默认值并在 `/风格状态` 中提示。
 - 可选的关键词预判、仅对已注入回复判定、判定超时、按会话限定生效范围。
 
+[v0.1.6]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.6
 [v0.1.5]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.5
 [v0.1.4]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.4
 [v0.1.3]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.3
