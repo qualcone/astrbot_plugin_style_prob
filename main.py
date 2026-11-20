@@ -29,7 +29,8 @@ IDLE_DAYS = 90  # 超过多少天没有活跃的会话，其计数从存储里�
 PRUNE_INTERVAL = 24 * 3600  # 清理不活跃会话的检查间隔（秒）
 RECENT_ROUNDS = 200  # 内存里保留多少条“最近注入记录”（只在内存，重启清空）
 SNIPPET_CHARS = 30   # 记录里最多保留回复开头多少个字
-
+RAW_CHARS = 60       # 记录里最多保留判定模型原始回答的多少个字
+FULL_REPLY_LOG_CHARS = 2000  # 日志里完整回复最多写多少个字
 
 class StyleProbPlugin(Star):
     FLUSH_DELAY = FLUSH_DELAY  # 作为类属性，测试里可覆盖
@@ -531,7 +532,7 @@ class StyleProbPlugin(Star):
         if info.injected:  # 只记录被注入的轮次；判定结果在后台任务里补上
             snippet = reply.replace("\n", " ")
             rec = {"ts": time.time(), "umo": info.umo, "k": info.k, "prob": info.prob,
-                   "result": "pending", "ms": None,
+                   "result": "pending", "ms": None, "raw": "",
                    "snippet": snippet[:SNIPPET_CHARS] + ("…" if len(snippet) > SNIPPET_CHARS else "")}
             self._recent.append(rec)
         # 不 await：判定与落盘都放到后台任务，立即返回，不拖慢回复发送
@@ -554,12 +555,14 @@ class StyleProbPlugin(Star):
         try:
             await self._persist(info.umo)
             if not do_judge:
-                self._finish_record(rec, "skipped", None)
+                self._finish_record(rec, "skipped", None, reply=reply)
                 return
             t0 = time.perf_counter()
-            hit = await self._judge(info.umo, reply, user_text)
+            judged: dict = {}
+            hit = await self._judge(info.umo, reply, user_text, out=judged)
             ms = int((time.perf_counter() - t0) * 1000)
-            self._finish_record(rec, "failed" if hit is None else "hit" if hit else "miss", ms)
+            self._finish_record(rec, "failed" if hit is None else "hit" if hit else "miss", ms,
+                                raw=judged.get("raw"), reply=reply)
             stats = await self._get_stats()
             if hit is None:
                 stats["judge_failed"] += 1
@@ -582,23 +585,37 @@ class StyleProbPlugin(Star):
         except Exception as e:  # 后台任务的异常不能悄悄吞掉
             logger.error(f"[style_prob] 判定任务失败: {e!r}")
 
-    def _finish_record(self, rec: dict | None, result: str, ms: int | None):
-        """补全“最近注入记录”里这一轮的判定结果，并按配置写一行日志。"""
+    def _finish_record(self, rec: dict | None, result: str, ms: int | None, *,
+                       raw: str | None = None, reply: str = ""):
+        """补全“最近注入记录”里这一轮的判定结果，并按配置写日志。"""
         if rec is None:
             return
+        raw = (raw or "").replace("\n", " ").strip()
         rec["result"], rec["ms"] = result, ms
-        if self._flag("log_rounds", True):
+        rec["raw"] = raw[:RAW_CHARS] + ("…" if len(raw) > RAW_CHARS else "")
+        full = self._flag("log_full_reply", False)
+        if full or self._flag("log_rounds", True):
             label = {"hit": "出现", "miss": "未出现", "failed": "判定失败", "skipped": "未判定"}[result]
-            logger.info(f"[style_prob] 已注入 会话={rec['umo']} 第{rec['k']}条 概率={rec['prob']:.3f} "
-                        f"判定={label} 用时={'-' if ms is None else ms}ms 回复开头={rec['snippet']!r}")
+            line = (f"[style_prob] 已注入 会话={rec['umo']} 第{rec['k']}条 概率={rec['prob']:.3f} "
+                    f"判定={label} 用时={'-' if ms is None else ms}ms 判定模型回答={rec['raw']!r}")
+            if full:  # 完整回复：便于核对“模型到底回了什么”；内容可能较长，也含聊天内容，默认关闭
+                text = reply.strip()
+                line += f" 完整回复={text[:FULL_REPLY_LOG_CHARS]!r}" + ("…（已截断）" if len(text) > FULL_REPLY_LOG_CHARS else "")
+            else:
+                line += f" 回复开头={rec['snippet']!r}"
+            logger.info(line)
 
     # ------------------------------------------------------------------ 判定
     async def _judge(self, umo: str, reply: str, user_text: str, *,
                      instruction: str | None = None, template: str | None = None,
-                     use_keywords: bool = True) -> bool | None:
+                     use_keywords: bool = True, out: dict | None = None) -> bool | None:
         """True=风格出现，False=没出现，None=无法判定（不改变状态）。
-        instruction / template / use_keywords 仅供自测覆盖，正常流程用配置。"""
+        instruction / template / use_keywords 仅供自测覆盖，正常流程用配置。
+        out 若传入，会写入 out["raw"]：判定模型的原始回答（或“关键词命中”“调用失败”），供记录排查用。"""
+        if out is None:
+            out = {}
         if use_keywords and core.keyword_hit(reply, self._keywords()):
+            out["raw"] = "（关键词命中，未调用判定模型）"
             return True  # 关键词只用于"确定是"；没命中不代表"否"，继续交给模型
 
         prompt = core.build_judge_prompt(
@@ -614,8 +631,10 @@ class StyleProbPlugin(Star):
                 text = await asyncio.wait_for(self._call_llm(pid, prompt), timeout=self._timeout())
         except Exception as e:
             logger.warning(f"[style_prob] 判定模型调用失败，本轮不更新: {e!r}")
+            out["raw"] = f"（调用失败：{type(e).__name__}）"
             return None
 
+        out["raw"] = text
         verdict = core.parse_yes_no(text)
         if verdict is None:
             logger.warning(f"[style_prob] 判定结果无法解析为是/否: {text!r}")

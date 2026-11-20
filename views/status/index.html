@@ -129,7 +129,7 @@
       " 条，仅保存在内存中，重启后清空；回复只保留开头一小段。";
     if (!rows.length) { box.appendChild(el("div", "empty", "还没有注入记录")); return; }
     var table = el("table"), head = el("tr");
-    ["时间", "会话", "第 k 条", "注入概率", "判定", "用时", "回复开头"].forEach(function (h) { head.appendChild(el("th", "", h)); });
+    ["时间", "会话", "第 k 条", "注入概率", "判定", "判定模型回答", "用时", "回复开头"].forEach(function (h) { head.appendChild(el("th", "", h)); });
     table.appendChild(head);
     rows.forEach(function (r) {
       var tr = el("tr");
@@ -140,6 +140,7 @@
       var res = el("td", "num", RESULT[r.result] || r.result);
       if (r.result === "failed") res.className += " err";
       tr.appendChild(res);
+      tr.appendChild(el("td", "", r.raw || "-"));
       tr.appendChild(el("td", "num", r.ms === null || r.ms === undefined ? "-" : r.ms + " ms"));
       tr.appendChild(el("td", "", r.snippet));
       table.appendChild(tr);

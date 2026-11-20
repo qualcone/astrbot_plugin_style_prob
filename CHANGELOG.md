@@ -2,6 +2,12 @@
 
 本文件记录各版本的主要变更，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v0.1.7] - 2026-11-20
+
+### 新增
+- 配置项“日志中记录注入后模型的完整回复”（默认关闭）：开启后，每次注入的日志里写入模型的完整回复（最多 2000 字，超出截断）和判定模型的原始回答，用于排查“风格没出现”是模型没照做还是判定有误。
+- 注入记录增加“判定模型回答”：显示判定模型实际回了什么（“是”“否”或其他内容），关键词命中、调用失败也会标明。「频率状态」页的“最近注入记录”新增这一列。
+
 ## [v0.1.6] - 2026-11-20
 
 ### 修复
@@ -71,6 +77,7 @@
 - 全部数字配置的范围校验，无效值回退为默认值并在 `/风格状态` 中提示。
 - 可选的关键词预判、仅对已注入回复判定、判定超时、按会话限定生效范围。
 
+[v0.1.7]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.7
 [v0.1.6]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.6
 [v0.1.5]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.5
 [v0.1.4]: https://github.com/qualcone/astrbot_plugin_style_prob/releases/tag/v0.1.4
